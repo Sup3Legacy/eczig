@@ -50,33 +50,64 @@ const Bytes = struct {
     slices: ArrayList([]const u8),
 };
 
+// Main entry for data extraction
+// We want to ensure that a pointer is passed
+// In order not to track copied values smh
 pub fn getBytes(v: anytype) Bytes {
-    var bytes = Bytes{ .slices = ArrayList([]const u8).init(allocator) };
-    getBytesRec(v, &bytes);
-    return bytes;
+    switch (@typeInfo(@TypeOf(v))) {
+        .Pointer => {
+            var bytes = Bytes{ .slices = ArrayList([]const u8).init(allocator) };
+            getBytesRec(v.*, &bytes);
+            return bytes;
+        },
+        else => {
+            @compileError("Argument is not a pointer");
+        },
+    }
 }
 
 fn getBytesRec(v: anytype, bytes: *Bytes) void {
     const T = @TypeOf(v);
     switch (@typeInfo(T)) {
         .Bool => {
-            bytes.slices.append(@bitCast([@sizeOf(u8)]u8, @intCast(u8, @boolToInt(v)))[0..]) catch {};
+            getBytesRec(@boolToInt(v), bytes);
         },
         .Int => {
-            bytes.slices.append(@bitCast([@sizeOf(T)]u8, v)[0..]) catch {};
+            const bits_nb = @typeInfo(T).Int.bits;
+            if (bits_nb % 8 == 0) {
+                bytes.slices.append(@bitCast([@sizeOf(T)]u8, v)[0..]) catch {};
+            } else {
+                const new_bits_nb = ((bits_nb / 8) + 1) * 8;
+                const new_type = @Type(std.builtin.TypeInfo{
+                    .Int = std.builtin.TypeInfo.Int{
+                        .bits = new_bits_nb,
+                        .signedness = .unsigned,
+                    },
+                });
+                bytes.slices.append(@bitCast([new_bits_nb / 8]u8, @intCast(new_type, v))[0..]) catch {};
+            }
         },
         .Struct => |str| {
             inline for (str.fields) |field| {
                 const name = field.name;
                 getBytesRec(@field(v, name), bytes);
-                //bytes.append(@bitCast([@sizeOf(T)]u8, v)[0..]) catch {};
+                //bits.append(@bitCast([@sizeOf(T)]u8, v)[0..]) catch {};
             }
         },
         .Pointer => |_| {
             //const child_type = pointer.child;
             const intp = @ptrToInt(v);
-            bytes.slices.append(@bitCast([@sizeOf(usize)]u8, intp)[0..]) catch {};
+            getBytesRec(intp, bytes);
             getBytesRec(v.*, bytes);
+        },
+        .Optional => |_| {
+            if (v) |some| {
+                getBytesRec(some, bytes);
+            }
+        },
+        .Enum => |_| {
+            const val = @enumToInt(v);
+            getBytesRec(val, bytes);
         },
         else => {},
     }
@@ -84,7 +115,7 @@ fn getBytesRec(v: anytype, bytes: *Bytes) void {
 
 test "Simple Bytes" {
     const a: usize = 5;
-    var b = getBytes(a);
+    var b = getBytes(&a);
     try expectEq(@as(usize, 8), b.slices.pop().len);
 }
 
@@ -94,7 +125,7 @@ test "Structs" {
         b: bool,
     };
     var a = TestStruct{ .a = 12, .b = true };
-    var b = getBytes(a);
+    var b = getBytes(&a);
     try expectEq(@as(usize, 2), b.slices.items.len);
 }
 
@@ -109,6 +140,21 @@ test "Structs & pointers" {
     };
     var a = TestStruct0{ .a = 42, .b = true };
     var a_ = TestStruct1{ .a = 69, .b = &a };
-    var b = getBytes(a_);
+    var b = getBytes(&a_);
     try expectEq(@as(usize, 4), b.slices.items.len);
+}
+
+test "Enums" {
+    {
+        const Enu = enum { Yes, No };
+        var a = Enu.Yes;
+        var b = getBytes(&a);
+        try expectEq(@as(usize, 1), b.slices.items.len);
+    }
+    {
+        const Enu = enum { Yes, No };
+        var a = &(Enu.Yes);
+        var b = getBytes(&a);
+        try expectEq(@as(usize, 2), b.slices.items.len);
+    }
 }
