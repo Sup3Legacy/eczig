@@ -57,7 +57,7 @@ pub fn getBytes(v: anytype) Bytes {
     switch (@typeInfo(@TypeOf(v))) {
         .Pointer => {
             var bytes = Bytes{ .slices = ArrayList([]const u8).init(allocator) };
-            getBytesRec(v.*, &bytes);
+            getBytesRec(v, &bytes);
             return bytes;
         },
         else => {
@@ -67,15 +67,19 @@ pub fn getBytes(v: anytype) Bytes {
 }
 
 fn getBytesRec(v: anytype, bytes: *Bytes) void {
-    const T = @TypeOf(v);
+    const T = @TypeOf(v.*);
     switch (@typeInfo(T)) {
         .Bool => {
-            getBytesRec(@boolToInt(v), bytes);
+            bytes.slices.append(
+                    @ptrCast(*[@sizeOf(bool)]u8, v)[0..]
+                ) catch {};
         },
         .Int => {
             const bits_nb = @typeInfo(T).Int.bits;
             if (bits_nb % 8 == 0) {
-                bytes.slices.append(@bitCast([@sizeOf(T)]u8, v)[0..]) catch {};
+                bytes.slices.append(
+                    @ptrCast(*[@sizeOf(T)]u8, v)[0..]
+                ) catch {};
             } else {
                 const new_bits_nb = ((bits_nb / 8) + 1) * 8;
                 const new_type = @Type(std.builtin.TypeInfo{
@@ -84,20 +88,22 @@ fn getBytesRec(v: anytype, bytes: *Bytes) void {
                         .signedness = .unsigned,
                     },
                 });
-                bytes.slices.append(@bitCast([new_bits_nb / 8]u8, @intCast(new_type, v))[0..]) catch {};
+                _ = new_type;
+                bytes.slices.append(
+                    @ptrCast(*[new_bits_nb / 8]u8, v)[0..]
+                ) catch {};
             }
         },
         .Struct => |str| {
             inline for (str.fields) |field| {
                 const name = field.name;
-                getBytesRec(@field(v, name), bytes);
-                //bits.append(@bitCast([@sizeOf(T)]u8, v)[0..]) catch {};
+                getBytesRec(&@field(v, name), bytes);
             }
         },
         .Pointer => |_| {
-            //const child_type = pointer.child;
-            const intp = @ptrToInt(v);
-            getBytesRec(intp, bytes);
+            bytes.slices.append(
+                    @ptrCast(*[@sizeOf(usize)]u8, v)[0..]
+                ) catch {};
             getBytesRec(v.*, bytes);
         },
         .Optional => |_| {
@@ -105,18 +111,23 @@ fn getBytesRec(v: anytype, bytes: *Bytes) void {
                 getBytesRec(some, bytes);
             }
         },
-        .Enum => |_| {
-            const val = @enumToInt(v);
-            getBytesRec(val, bytes);
+        .Enum => |enu| {
+            bytes.slices.append(
+                    @ptrCast(*const [@sizeOf(enu.tag_type)]u8, v)[0..]
+                ) catch {};
         },
         else => {},
     }
 }
 
 test "Simple Bytes" {
-    const a: usize = 5;
+    var a: usize = 5;
     var b = getBytes(&a);
-    try expectEq(@as(usize, 8), b.slices.pop().len);
+    var peek = b.slices.pop();
+    try expectEq(@as(usize, 8), peek.len);
+    std.debug.print("\n{any}\n", .{@ptrCast(*const align(1) usize, peek).*});
+    a = 4;
+    std.debug.print("{any}\n", .{@ptrCast(*const align(1) usize, peek).*});
 }
 
 test "Structs" {
@@ -126,6 +137,16 @@ test "Structs" {
     };
     var a = TestStruct{ .a = 12, .b = true };
     var b = getBytes(&a);
+    var peek = b.slices.items[0];
+    std.debug.print("\n{any}\n", .{@ptrCast(*const align(1) usize, peek).*});
+    a.a = 69;
+    std.debug.print("{any}\n", .{@ptrCast(*const align(1) usize, peek).*});
+
+    peek = b.slices.items[1];
+    std.debug.print("{any}\n", .{@ptrCast(*const align(1) bool, peek).*});
+    a.b = false;
+    std.debug.print("{any}\n", .{@ptrCast(*const align(1) bool, peek).*});
+
     try expectEq(@as(usize, 2), b.slices.items.len);
 }
 
@@ -142,6 +163,11 @@ test "Structs & pointers" {
     var a_ = TestStruct1{ .a = 69, .b = &a };
     var b = getBytes(&a_);
     try expectEq(@as(usize, 4), b.slices.items.len);
+
+    var peek = b.slices.items[2];
+    std.debug.print("\n{any}\n", .{@ptrCast(*const align(1) usize, peek).*});
+    a_.b.a = 43;
+    std.debug.print("{any}\n", .{@ptrCast(*const align(1) usize, peek).*});
 }
 
 test "Enums" {
@@ -150,11 +176,24 @@ test "Enums" {
         var a = Enu.Yes;
         var b = getBytes(&a);
         try expectEq(@as(usize, 1), b.slices.items.len);
+
+        var peek = b.slices.items[0];
+
+        std.debug.print("\n{any}\n", .{@ptrCast(*const align(1) Enu, peek).*});
+        a = Enu.No;
+        std.debug.print("{any}\n", .{@ptrCast(*const align(1) Enu, peek).*});
     }
     {
         const Enu = enum { Yes, No };
-        var a = &(Enu.Yes);
+        var a_ = Enu.Yes;
+        var a = &(a_);
         var b = getBytes(&a);
         try expectEq(@as(usize, 2), b.slices.items.len);
+
+        var peek = b.slices.items[1];
+
+        std.debug.print("{any}\n", .{@ptrCast(*const align(1) Enu, peek).*});
+        a.* = Enu.No;
+        std.debug.print("{any}\n", .{@ptrCast(*const align(1) Enu, peek).*});
     }
 }
